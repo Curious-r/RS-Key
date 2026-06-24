@@ -387,12 +387,11 @@ async fn main(_spawner: Spawner) {
     }
 
     // Choose the presence button: phy.up_driver/up_btn overrides the default BOOTSEL.
-    // GPIO-pin routing for the presence button is not yet wired; the Embassy pin
-    // ownership model prevents two independent matches over the same pin set.
-    // Integration into the LED block's single pin match is left as future work.
+    // GPIO routing for the presence button is blocked by Embassy's pin ownership
+    // model: two independent matches over the same 30-pin set are not possible.
+    // A pool-based allocator (`pins.rs`) is designed but needs `AnyPin::degrade()`
+    // which is unavailable in the current embassy-rp 0.10.0.
     let presence_button = PresenceButton::new_bootsel(p.BOOTSEL);
-
-    // LED backend, selected at runtime from the phy record (PicoForge-compatible),
     // defaulting to the build LED_KIND / LED_PIN. A non-`none` build compiles all
     // three hardware backends so the driver + pin can change without reflashing; a
     // `none` build is headless (the status engine still runs — vendor SET/GET LED
