@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 RS-Key contributors
 
-//! Physical user presence over the BOOTSEL button, sampled via the
-//! QSPI-CS-to-Hi-Z trick in a RAM function. The wait blocks the worker while the
-//! high-priority transports stream keepalives reporting `UPNEEDED` ([`up_pending`]).
-//! One [`BootselPresence`] serves every applet's `UserPresence` trait; a touch is
-//! required by default, and the opt-in `no-touch` feature makes `request` confirm
-//! instantly (for the automated suites, which cannot press a button).
+//! Physical user presence: either the dedicated BOOTSEL button (sampled via the
+//! QSPI-CS-to-Hi-Z trick in a RAM function) or a plain GPIO input.
+//! The wait blocks the worker while the high-priority transports stream keepalives
+//! reporting `UPNEEDED` ([`up_pending`]). One [`PresenceButton`] serves every
+//! applet's `UserPresence` trait; a touch is required by default, and the opt-in
+//! `no-touch` feature makes `request` confirm instantly.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_rp::Peri;
 use embassy_rp::peripherals::BOOTSEL;
+#[allow(unused_imports)]
+use embassy_rp::gpio::Input;
 
 #[cfg(not(feature = "no-touch"))]
 use embassy_rp::bootsel::is_bootsel_pressed;
@@ -24,35 +26,26 @@ static UP_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Set by the CTAPHID transport (high-priority executor) when a `CTAPHID_CANCEL`
 /// arrives for the request the worker is processing. The button wait — running on
-/// the worker executor — polls it each iteration and abandons with `Cancelled`, so
-/// the in-flight CTAP2 command answers `CTAP2_ERR_KEEPALIVE_CANCEL`. Cross-executor
-/// (transport sets, worker reads), mirroring `UP_PENDING` in the other direction.
+/// the worker executor — polls it each iteration and abandons with `Cancelled`.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// The CTAPHID keepalive hook passed to `CtapHid::new`: is a touch being awaited?
-/// Always `false` on the `no-touch` build, so the status stays `PROCESSING`.
+/// The CTAPHID keepalive hook: is a touch being awaited?
 pub fn up_pending() -> bool {
     UP_PENDING.load(Ordering::Relaxed)
 }
 
-/// The CTAPHID cancel hook passed to `CtapHid::new`: request that an in-flight
-/// touch wait be abandoned. Just sets the flag the wait polls (a no-op on the
-/// no-button build, where `request` confirms instantly and never waits).
+/// The CTAPHID cancel hook: request that an in-flight touch wait be abandoned.
 pub fn request_cancel() {
     CANCEL_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-// Poll cadence and the press timeout. `block_for` keeps interrupts enabled, so the
-// high-priority executor (USB + keepalives) runs between polls; only the ~4000-cycle
-// `is_bootsel_pressed` read briefly masks interrupts.
+// Poll cadence and the press timeout.
 #[cfg(not(feature = "no-touch"))]
 const POLL_MS: u64 = 16;
 #[cfg(not(feature = "no-touch"))]
 const TIMEOUT_MS: u64 = 30_000;
 
-/// Neutral wait result, mapped to each applet's own `Presence` enum. The button
-/// has no "declined" gesture; `Cancelled` comes from a `CTAPHID_CANCEL` (FIDO
-/// only) observed via [`CANCEL_REQUESTED`].
+/// Neutral wait result, mapped to each applet's own `Presence` enum.
 #[cfg(not(feature = "no-touch"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -61,45 +54,57 @@ enum Outcome {
     Cancelled,
 }
 
-/// User presence via the BOOTSEL button.
-pub struct BootselPresence {
-    #[cfg_attr(feature = "no-touch", allow(dead_code))]
-    bootsel: Peri<'static, BOOTSEL>,
+/// Polarity of a GPIO-attached button: `ActiveLow` pulls the pin low when pressed
+/// (button to GND), `ActiveHigh` sees a high level (e.g. a capacitive touch module).
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub enum Polarity {
+    ActiveLow,
+    ActiveHigh,
 }
 
-impl BootselPresence {
-    pub fn new(bootsel: Peri<'static, BOOTSEL>) -> Self {
-        Self { bootsel }
+/// User-presence button: either the RP2350's dedicated BOOTSEL or a GPIO pin with
+/// configurable polarity. The `no-touch` build short-cuts everything to `Confirmed`.
+#[allow(dead_code)]
+pub enum PresenceButton {
+    Bootsel(Peri<'static, BOOTSEL>),
+    Gpio(Input<'static>, Polarity),
+}
+
+impl PresenceButton {
+    /// Wrap the dedicated BOOTSEL pin.
+    pub fn new_bootsel(bootsel: Peri<'static, BOOTSEL>) -> Self {
+        Self::Bootsel(bootsel)
     }
 
-    /// One non-blocking sample of the BOOTSEL level, for the typed-ticket button
-    /// watcher. On the `no-touch` build it never samples — the test build sees no
-    /// press and does no QSPI-CS polling.
+    /// Wrap a GPIO pin as a presence button with the given polarity.
+    #[allow(dead_code)]
+    pub fn new_gpio(pin: Input<'static>, pol: Polarity) -> Self {
+        Self::Gpio(pin, pol)
+    }
+
+    /// One non-blocking sample of the button level.
     pub fn poll_pressed(&mut self) -> bool {
         #[cfg(not(feature = "no-touch"))]
-        {
-            is_bootsel_pressed(self.bootsel.reborrow())
+        match self {
+            Self::Bootsel(pin) => is_bootsel_pressed(pin.reborrow()),
+            Self::Gpio(pin, Polarity::ActiveLow) => pin.is_low(),
+            Self::Gpio(pin, Polarity::ActiveHigh) => pin.is_high(),
         }
         #[cfg(feature = "no-touch")]
-        {
-            false
-        }
+        false
     }
 
+    /// Block until button press, timeout, or cancellation.
     #[cfg(not(feature = "no-touch"))]
     fn wait(&mut self) -> Outcome {
-        // Save the LED status, show the touch status for the wait, restore after.
         let saved = crate::led::status();
         crate::led::set_status(crate::led::STATUS_TOUCH);
-        // Drop any cancel left from an earlier (already-finished) request so this
-        // wait starts clean.
         CANCEL_REQUESTED.store(false, Ordering::Relaxed);
         UP_PENDING.store(true, Ordering::Relaxed);
         let start = Instant::now();
-        // Wait for a press; a CTAPHID_CANCEL aborts it, and with neither in
-        // TIMEOUT_MS it times out.
         let result = loop {
-            if is_bootsel_pressed(self.bootsel.reborrow()) {
+            if self.poll_pressed() {
                 break Outcome::Confirmed;
             }
             if CANCEL_REQUESTED.load(Ordering::Relaxed) {
@@ -110,11 +115,10 @@ impl BootselPresence {
             }
             block_for(Duration::from_millis(POLL_MS));
         };
-        // Debounce: wait for release (bounded) so a held button doesn't
-        // immediately satisfy the next operation.
+        // Debounce: wait for release (bounded).
         if result == Outcome::Confirmed {
             let release = Instant::now();
-            while is_bootsel_pressed(self.bootsel.reborrow()) {
+            while self.poll_pressed() {
                 if release.elapsed() >= Duration::from_millis(TIMEOUT_MS) {
                     break;
                 }
@@ -122,79 +126,58 @@ impl BootselPresence {
             }
         }
         UP_PENDING.store(false, Ordering::Relaxed);
-        // Clear any cancel that raced in (e.g. just after a confirm) so it can't
-        // leak into the next request's wait.
         CANCEL_REQUESTED.store(false, Ordering::Relaxed);
         crate::led::set_status(saved);
         result
     }
 }
 
-impl rsk_fido::UserPresence for BootselPresence {
-    fn request(&mut self) -> rsk_fido::Presence {
-        #[cfg(not(feature = "no-touch"))]
-        {
-            match self.wait() {
-                Outcome::Confirmed => rsk_fido::Presence::Confirmed,
-                Outcome::Timeout => rsk_fido::Presence::Timeout,
-                Outcome::Cancelled => rsk_fido::Presence::Cancelled,
+// Use a macro for the three nearly-identical UserPresence impls.
+macro_rules! impl_user_presence {
+    ($trait_path:path, $presence_path:path, $confirmed:path, $timeout:path, $cancelled:path) => {
+        impl $trait_path for PresenceButton {
+            fn request(&mut self) -> $presence_path {
+                #[cfg(not(feature = "no-touch"))]
+                match self.wait() {
+                    Outcome::Confirmed => $confirmed,
+                    Outcome::Timeout => $timeout,
+                    Outcome::Cancelled => $cancelled,
+                }
+                #[cfg(feature = "no-touch")]
+                $confirmed
             }
         }
-        #[cfg(feature = "no-touch")]
-        {
-            rsk_fido::Presence::Confirmed
-        }
-    }
+    };
 }
 
-impl rsk_openpgp::UserPresence for BootselPresence {
-    fn request(&mut self) -> rsk_openpgp::Presence {
-        #[cfg(not(feature = "no-touch"))]
-        {
-            match self.wait() {
-                Outcome::Confirmed => rsk_openpgp::Presence::Confirmed,
-                // OpenPGP UIF runs over CCID, which carries no CTAPHID_CANCEL, so
-                // Cancelled is unreachable here; treat it as a non-confirmation.
-                Outcome::Timeout | Outcome::Cancelled => rsk_openpgp::Presence::Timeout,
-            }
-        }
-        #[cfg(feature = "no-touch")]
-        {
-            rsk_openpgp::Presence::Confirmed
-        }
-    }
-}
+impl_user_presence!(
+    rsk_fido::UserPresence,
+    rsk_fido::Presence,
+    rsk_fido::Presence::Confirmed,
+    rsk_fido::Presence::Timeout,
+    rsk_fido::Presence::Cancelled
+);
 
-impl rsk_otp::UserPresence for BootselPresence {
-    fn request(&mut self) -> rsk_otp::Presence {
-        #[cfg(not(feature = "no-touch"))]
-        {
-            match self.wait() {
-                Outcome::Confirmed => rsk_otp::Presence::Confirmed,
-                // CCID-only applet: no CTAPHID_CANCEL reaches it.
-                Outcome::Timeout | Outcome::Cancelled => rsk_otp::Presence::Timeout,
-            }
-        }
-        #[cfg(feature = "no-touch")]
-        {
-            rsk_otp::Presence::Confirmed
-        }
-    }
-}
+impl_user_presence!(
+    rsk_openpgp::UserPresence,
+    rsk_openpgp::Presence,
+    rsk_openpgp::Presence::Confirmed,
+    rsk_openpgp::Presence::Timeout,
+    rsk_openpgp::Presence::Timeout
+);
 
-impl rsk_oath::UserPresence for BootselPresence {
-    fn request(&mut self) -> rsk_oath::Presence {
-        #[cfg(not(feature = "no-touch"))]
-        {
-            match self.wait() {
-                Outcome::Confirmed => rsk_oath::Presence::Confirmed,
-                // CCID-only applet: no CTAPHID_CANCEL reaches it.
-                Outcome::Timeout | Outcome::Cancelled => rsk_oath::Presence::Timeout,
-            }
-        }
-        #[cfg(feature = "no-touch")]
-        {
-            rsk_oath::Presence::Confirmed
-        }
-    }
-}
+impl_user_presence!(
+    rsk_otp::UserPresence,
+    rsk_otp::Presence,
+    rsk_otp::Presence::Confirmed,
+    rsk_otp::Presence::Timeout,
+    rsk_otp::Presence::Timeout
+);
+
+impl_user_presence!(
+    rsk_oath::UserPresence,
+    rsk_oath::Presence,
+    rsk_oath::Presence::Confirmed,
+    rsk_oath::Presence::Timeout,
+    rsk_oath::Presence::Timeout
+);

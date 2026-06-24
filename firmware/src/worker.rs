@@ -23,7 +23,7 @@ use rsk_usb::ctaphid::{CTAP_MAX_MESSAGE, MsgHandler};
 use crate::ccid_handler::CcidApplets;
 use crate::handler::{AppletHandler, FidoRng, Store};
 use crate::otp_kbd;
-use crate::presence::BootselPresence;
+use crate::presence::PresenceButton;
 
 /// A worker request carries a full CTAPHID message at most; responses match —
 /// an ML-DSA-44 makeCredential response runs ~4 KB, and getInfo advertises
@@ -171,9 +171,9 @@ pub struct Worker<'a> {
     /// The TRNG/DRBG, kept for the secure-reboot wipe (the DRBG state is the one
     /// long-lived RAM secret outside the applet layer).
     rng: &'a RefCell<FidoRng>,
-    /// The BOOTSEL button, for the typed-ticket press watcher (the same button the
+    /// The button, for the typed-ticket press watcher (the same button the
     /// applets borrow for touch confirmation, behind the shared `RefCell`).
-    presence: &'a RefCell<BootselPresence>,
+    presence: &'a RefCell<PresenceButton>,
     /// Click-counter state: last sampled level, click count, and the
     /// ms of the last release.
     btn_state: bool,
@@ -188,16 +188,16 @@ const BTN_POLL_MS: u64 = 16;
 const CLICK_WINDOW_MS: u64 = 1000;
 
 impl<'a> Worker<'a> {
-    /// `presence` is the one BOOTSEL button, shared (through its `RefCell`) by the
+    /// `presence` is the one presence button, shared (through its `RefCell`) by the
     /// FIDO handler (CTAP user presence), the OpenPGP applet (the UIF DOs), the
     /// OTP applet (CHAL_BTN_TRIG) and the OATH applet (PROP_TOUCH credentials) —
-    /// the `&RefCell<BootselPresence>` coerces to each applet's `UserPresence`
+    /// the `&RefCell<PresenceButton>` coerces to each applet's `UserPresence`
     /// trait.
     #[allow(clippy::too_many_arguments)] // one-time wiring from main
     pub fn new(
         fs: &'a RefCell<Store>,
         rng: &'a RefCell<FidoRng>,
-        presence: &'a RefCell<BootselPresence>,
+        presence: &'a RefCell<PresenceButton>,
         platform: &'a RefCell<crate::rescue_platform::RescuePlatform>,
         serial_id: [u8; 8],
         serial_hash: [u8; 32],

@@ -32,6 +32,9 @@ const TAG_LED_ORDER: u8 = 0xD;
 // RS-Key vendor tag: number of physically-connected addressable LEDs.
 // 0 = unset (use the build's MAX_LEDS default).
 const TAG_LED_NUM: u8 = 0xE;
+// RS-Key vendor tag: user-presence button driver type.
+// 0 = bootsel (RP2350 dedicated, no pin), 1 = gpio-low, 2 = gpio-high.
+const TAG_UP_DRIVER: u8 = 0xF;
 
 /// `led_order` wire value: a standard WS2812B (GRB) part, red↔green swapped.
 pub const LED_ORDER_GRB: u8 = 1;
@@ -76,7 +79,8 @@ pub const PHY_MAX_SIZE: usize = (2 + 4)
     + (2 + 1)
     + (2 + 1)
     + (2 + 1)
-    + (2 + 1); // led_num
+    + (2 + 1) // led_num
+    + (2 + 1); // up_driver
 
 const PRODUCT_CAP: usize = 32;
 
@@ -127,6 +131,9 @@ pub struct PhyData {
     /// Number of physically connected addressable LEDs (tag `0x0E`);
     /// `None` / `0` = use the build's `MAX_LEDS` default.
     pub led_num: Option<u8>,
+    /// User-presence button driver (tag `0x0F`):
+    /// `None` / `0` = bootsel (RP2350 dedicated), `1` = gpio-low, `2` = gpio-high.
+    pub up_driver: Option<u8>,
 }
 
 impl PhyData {
@@ -167,6 +174,7 @@ impl PhyData {
                 (TAG_LED_DRIVER, 1) => phy.led_driver = Some(v[0]),
                 (TAG_LED_ORDER, 1) => phy.led_order = Some(v[0]),
                 (TAG_LED_NUM, 1) => phy.led_num = Some(v[0]),
+                (TAG_UP_DRIVER, 1) => phy.up_driver = Some(v[0]),
                 _ => {}
             }
             p = &p[tlen..];
@@ -217,6 +225,9 @@ impl PhyData {
         }
         if let Some(n) = self.led_num {
             w.tlv(TAG_LED_NUM, &[n])?;
+        }
+        if let Some(d) = self.up_driver {
+            w.tlv(TAG_UP_DRIVER, &[d])?;
         }
         Some(w.len)
     }
@@ -340,6 +351,9 @@ mod proofs {
         if kani::any() {
             phy.led_num = Some(kani::any());
         }
+        if kani::any() {
+            phy.up_driver = Some(kani::any());
+        }
 
         let mut buf = [0u8; PHY_MAX_SIZE];
         let n = phy.serialize(&mut buf).unwrap();
@@ -363,6 +377,7 @@ mod proofs {
         assert_eq!(got.led_driver, phy.led_driver);
         assert_eq!(got.led_order, phy.led_order);
         assert_eq!(got.led_num, phy.led_num);
+        assert_eq!(got.up_driver, phy.up_driver);
     }
 }
 
@@ -384,6 +399,7 @@ mod tests {
             led_driver: Some(3),
             led_order: Some(LED_ORDER_GRB),
             led_num: Some(4),
+            up_driver: Some(1),
         };
         let mut buf = [0u8; PHY_MAX_SIZE];
         let n = phy.serialize(&mut buf).unwrap();

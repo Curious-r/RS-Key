@@ -27,12 +27,17 @@ TAG_LED_GPIO = 0x04
 TAG_LED_DRIVER = 0x0C
 TAG_LED_ORDER = 0x0D  # RS-Key vendor tag (PicoForge skips it as unknown)
 TAG_LED_NUM = 0x0E  # RS-Key vendor tag: addressable LED count
+TAG_UP_DRIVER = 0x0F  # RS-Key vendor tag: user-presence button driver
+TAG_UP_BTN = 0x08  # user-presence button GPIO (PicoForge-compatible)
 
 # Driver numbering follows pico-fido / PicoForge's LedDriverType.
 DRIVERS = {"gpio": 1, "pimoroni": 2, "ws2812": 3}
 DRIVER_NAMES = {v: k for k, v in DRIVERS.items()}
 ORDERS = {"rgb": 0, "grb": 1}
 ORDER_NAMES = {v: k for k, v in ORDERS.items()}
+# User-presence button driver types.
+UP_DRIVERS = {"bootsel": 0, "gpio-low": 1, "gpio-high": 2}
+UP_DRIVER_NAMES = {v: k for k, v in UP_DRIVERS.items()}
 
 
 def register(sub):
@@ -60,6 +65,17 @@ def register(sub):
         type=int,
         metavar="1-255",
         help="number of addressable LEDs connected (runtime, overrides MAX_LEDS)",
+    )
+    p.add_argument(
+        "--up-driver",
+        choices=sorted(UP_DRIVERS),
+        help="presence button driver: bootsel (default, no pin), gpio-low, gpio-high",
+    )
+    p.add_argument(
+        "--up-btn",
+        type=int,
+        metavar="0-29",
+        help="presence button GPIO (only with --up-driver gpio-low/gpio-high)",
     )
     p.add_argument(
         "--get", action="store_true", help="read the current phy LED config and exit"
@@ -124,6 +140,11 @@ def _show(tlvs):
     )
     led_num = by.get(TAG_LED_NUM)
     print(f"  num     {led_num[0] if led_num else '(build default)'}")
+    up_drv = by.get(TAG_UP_DRIVER)
+    up_btn = by.get(TAG_UP_BTN)
+    btn_desc = UP_DRIVER_NAMES.get(up_drv[0], up_drv[0]) if up_drv else "bootsel"
+    pin_desc = f" pin={up_btn[0]}" if up_btn else ""
+    print(f"  button  {btn_desc}{pin_desc}")
 
 
 def run(args):
@@ -140,6 +161,8 @@ def run(args):
         or args.led_driver is not None
         or args.led_order is not None
         or args.led_num is not None
+        or args.up_driver is not None
+        or args.up_btn is not None
     )
     if args.get or not setting:
         _show(tlvs)
@@ -157,6 +180,26 @@ def run(args):
         if not 1 <= args.led_num <= 255:
             raise SystemExit("--led-num must be 1–255")
         _upsert(tlvs, TAG_LED_NUM, args.led_num)
+    if args.up_driver is not None:
+        if args.up_driver == "bootsel":
+            # Bootsel: no pin needed, clear the GPIO tag if present.
+            _upsert(tlvs, TAG_UP_DRIVER, UP_DRIVERS["bootsel"])
+            tlvs[:] = [(t, v) for t, v in tlvs if t != TAG_UP_BTN]
+        else:
+            if args.up_btn is None:
+                raise SystemExit(
+                    "--up-btn is required with --up-driver gpio-low/gpio-high"
+                )
+            if not 0 <= args.up_btn <= 29:
+                raise SystemExit("--up-btn must be 0–29")
+            _upsert(tlvs, TAG_UP_DRIVER, UP_DRIVERS[args.up_driver])
+            _upsert(tlvs, TAG_UP_BTN, args.up_btn)
+    elif args.up_btn is not None:
+        # --up-btn without --up-driver: default to gpio-low.
+        if not 0 <= args.up_btn <= 29:
+            raise SystemExit("--up-btn must be 0–29")
+        _upsert(tlvs, TAG_UP_DRIVER, UP_DRIVERS["gpio-low"])
+        _upsert(tlvs, TAG_UP_BTN, args.up_btn)
 
     blob = _serialize_tlv(tlvs)
     _, s1, s2 = ccid.transmit(
