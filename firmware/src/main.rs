@@ -387,17 +387,10 @@ async fn main(_spawner: Spawner) {
     }
 
     // Choose the presence button: phy.up_driver/up_btn overrides the default BOOTSEL.
-    // GPIO-pin routing shares a single match with the LED block below to avoid
-    // pin-ownership conflicts; when up_driver is set, the LED block also captures
-    // the matching pin as an Input. For now, only BOOTSEL is wired (the GPIO path
-    // is parsed but falls back to BOOTSEL until the LED-block integration lands).
-    let presence_button = match phy.as_ref().and_then(|p| p.up_driver) {
-        Some(1) | Some(2) if phy.as_ref().and_then(|p| p.up_btn).is_some() => {
-            // GPIO path: not yet wired through the shared pin match. Fall back.
-            PresenceButton::new_bootsel(p.BOOTSEL)
-        }
-        _ => PresenceButton::new_bootsel(p.BOOTSEL),
-    };
+    // GPIO-pin routing for the presence button is not yet wired; the Embassy pin
+    // ownership model prevents two independent matches over the same pin set.
+    // Integration into the LED block's single pin match is left as future work.
+    let presence_button = PresenceButton::new_bootsel(p.BOOTSEL);
 
     // LED backend, selected at runtime from the phy record (PicoForge-compatible),
     // defaulting to the build LED_KIND / LED_PIN. A non-`none` build compiles all
