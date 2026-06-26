@@ -27,7 +27,7 @@ use embassy_rp::pio::{Instance, InterruptHandler as PioIrq, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program, Rgb, RgbColorOrder};
 use embassy_rp::rom_data;
 use embassy_time::Timer;
-use smart_leds::RGB8;
+use smart_leds::{RGB8, SmartLedsWriteAsync};
 
 use panic_halt as _;
 
@@ -69,14 +69,14 @@ async fn main(_spawner: Spawner) {
     let program = PioWs2812Program::new(&mut common);
     // `Rgb` wire order: this board's WS2812 swaps R/G under the embassy GRB
     // default, so the success blink would show red instead of green.
-    let mut ws: PioWs2812<'_, _, 0, 1, Rgb> =
+    let mut ws: PioWs2812<'_, _, 0, Rgb> =
         PioWs2812::with_color_order(&mut common, sm0, p.DMA_CH0, Irqs, p.PIN_16, &program);
 
     // "RAM image is running" — a fast white strobe, unlike any flashed firmware.
     blink(&mut ws, WHITE, 8, 50).await;
 
     // Solid blue for the (multi-second) full erase + eyecatcher write.
-    ws.write(&[BLUE]).await;
+    let _ = ws.write([BLUE]).await;
     flash_erase_all();
     let mut page = [0u8; PAGE_SIZE];
     page[..4].copy_from_slice(b"NUKE");
@@ -116,16 +116,16 @@ fn flash_program(off: u32, data: &[u8]) {
 }
 
 /// Blink `color` `times` times, `ms` on / `ms` off.
-async fn blink<P: Instance, const S: usize, const N: usize, ORDER: RgbColorOrder>(
-    ws: &mut PioWs2812<'_, P, S, N, ORDER>,
+async fn blink<P: Instance, const S: usize, ORDER: RgbColorOrder>(
+    ws: &mut PioWs2812<'_, P, S, ORDER>,
     color: RGB8,
     times: usize,
     ms: u64,
 ) {
     for _ in 0..times {
-        ws.write(&[color; N]).await;
+        ws.write([color]).await.unwrap();
         Timer::after_millis(ms).await;
-        ws.write(&[OFF; N]).await;
+        ws.write([OFF]).await.unwrap();
         Timer::after_millis(ms).await;
     }
 }

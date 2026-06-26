@@ -51,6 +51,7 @@ mod handler;
 mod led;
 mod otp_kbd;
 mod otp_keys;
+mod pins;
 mod presence;
 mod rescue_platform;
 mod vendor;
@@ -386,21 +387,31 @@ async fn main(_spawner: Spawner) {
         hp.spawn(otp_kbd::kbd_task(kbd).unwrap());
     }
 
-    // Choose the presence button: phy.up_driver/up_btn overrides the default BOOTSEL.
-    // GPIO routing for the presence button is blocked by Embassy's pin ownership
-    // model: two independent matches over the same 30-pin set are not possible.
-    // A pool-based allocator (`pins.rs`) is designed but needs `AnyPin::degrade()`
-    // which is unavailable in the current embassy-rp 0.10.0.
-    let presence_button = PresenceButton::new_bootsel(p.BOOTSEL);
-    // defaulting to the build LED_KIND / LED_PIN. A non-`none` build compiles all
-    // three hardware backends so the driver + pin can change without reflashing; a
-    // `none` build is headless (the status engine still runs — vendor SET/GET LED
-    // keep working — but nothing renders it). The runtime pin reaches the PIO state
-    // machine via a `match` that moves the shared `sm0`/`DMA_CH0` across its
-    // mutually-exclusive arms (every `PioWs2812` erases the pin type, so all arms
-    // share one type) — embassy has no `PioPin for AnyPin`, but it doesn't need one.
+    // Presence button: phy.up_btn overrides the default BOOTSEL with a GPIO pin.
+    // Polarity comes from phy.up_driver: 1 = active-low, 2 = active-high.
+    // The GPIO path uses `AnyPin::steal()` — see `pins` for the safety model.
+    let presence_button = match phy.as_ref().and_then(|p| p.up_btn) {
+        Some(btn) if btn <= 29 => {
+            use crate::presence::Polarity;
+            use embassy_rp::gpio::{Input, Pull};
+            let pol = match phy.as_ref().and_then(|p| p.up_driver) {
+                Some(2) => Polarity::ActiveHigh,
+                _ => Polarity::ActiveLow,
+            };
+            // Safety: the selected GPIO is not used by any other driver (the LED
+            // block below uses a different pin, and the WS2812 path is a separate
+            // match arm).
+            let pin = unsafe { embassy_rp::gpio::AnyPin::steal(btn) };
+            PresenceButton::new_gpio(Input::new(pin, Pull::Up), pol)
+        }
+        _ => PresenceButton::new_bootsel(p.BOOTSEL),
+    };
+    // LED: three mutually-exclusive hardware backends selected at runtime by the
+    // phy record. The GPIO backend (driver=1) uses `AnyPin::steal()`; the WS2812
+    // backend (driver=3, fallback) needs concrete pins for `PioPin`.
     #[cfg(not(led_kind = "none"))]
     {
+        use embassy_rp::gpio::AnyPin;
         use embassy_rp::gpio::{Level, Output};
         use embassy_rp::pwm::Pwm;
 
@@ -419,45 +430,12 @@ async fn main(_spawner: Spawner) {
 
         match led_driver {
             1 => {
-                // `gpio`: a plain on/off LED on `led_gpio`. `Output<'static>` erases
-                // the pin, so every arm is the same type.
-                macro_rules! gpio_pin {
-                    ($pin:expr) => {
-                        Output::new($pin, Level::Low)
-                    };
-                }
-                let led = match led_gpio {
-                    0 => gpio_pin!(p.PIN_0),
-                    1 => gpio_pin!(p.PIN_1),
-                    2 => gpio_pin!(p.PIN_2),
-                    3 => gpio_pin!(p.PIN_3),
-                    4 => gpio_pin!(p.PIN_4),
-                    5 => gpio_pin!(p.PIN_5),
-                    6 => gpio_pin!(p.PIN_6),
-                    7 => gpio_pin!(p.PIN_7),
-                    8 => gpio_pin!(p.PIN_8),
-                    9 => gpio_pin!(p.PIN_9),
-                    10 => gpio_pin!(p.PIN_10),
-                    11 => gpio_pin!(p.PIN_11),
-                    12 => gpio_pin!(p.PIN_12),
-                    13 => gpio_pin!(p.PIN_13),
-                    14 => gpio_pin!(p.PIN_14),
-                    15 => gpio_pin!(p.PIN_15),
-                    16 => gpio_pin!(p.PIN_16),
-                    17 => gpio_pin!(p.PIN_17),
-                    18 => gpio_pin!(p.PIN_18),
-                    19 => gpio_pin!(p.PIN_19),
-                    20 => gpio_pin!(p.PIN_20),
-                    21 => gpio_pin!(p.PIN_21),
-                    22 => gpio_pin!(p.PIN_22),
-                    23 => gpio_pin!(p.PIN_23),
-                    24 => gpio_pin!(p.PIN_24),
-                    25 => gpio_pin!(p.PIN_25),
-                    26 => gpio_pin!(p.PIN_26),
-                    27 => gpio_pin!(p.PIN_27),
-                    28 => gpio_pin!(p.PIN_28),
-                    _ => gpio_pin!(p.PIN_29),
-                };
+                // `gpio`: a plain on/off LED on `led_gpio`. No 30-arm match needed
+                // — we steal the pin as AnyPin.
+                // Safety: the WS2812 arm is a separate match branch, so this pin is
+                // not aliased.
+                let led_pin = unsafe { AnyPin::steal(led_gpio) };
+                let led = Output::new(led_pin, Level::Low);
                 hp.spawn(led::gpio_task(led).unwrap());
             }
             2 => {
@@ -472,6 +450,7 @@ async fn main(_spawner: Spawner) {
                 // `ws2812` (driver 3, and the safe fallback): the single addressable
                 // RGB LED on `led_gpio`. Wire order is a software r/g swap in the
                 // task (`led::set_rg_swap`), so embassy's color order stays `Rgb`.
+                // WS2812 needs concrete pins because `AnyPin` ≠ `PioPin`.
                 let Pio {
                     mut common, sm0, ..
                 } = Pio::new(p.PIO0, Irqs);

@@ -16,7 +16,7 @@ let
 
   # Git deps (Cargo.lock) are vendored; these are their checkout hashes.
   # One per crate, but every embassy crate shares one git rev → one hash.
-  embassyHash = "sha256-FhbDmObz+lZ3baMs0wDqm4an5XOPOYFqVBytCy4yeTc=";
+  embassyHash = "sha256-S21AePU4ZuEGy6R3/fsI2xKKneHgZ1m39masnH1Y18Y=";
   rpPacHash = "sha256-7WOfWaR5tofEveaM4NRFTFsX4GM2vja9YB0d+V1Mhng=";
   firmwareOutputHashes =
     (lib.genAttrs [

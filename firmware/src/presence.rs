@@ -11,9 +11,9 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_rp::Peri;
-use embassy_rp::peripherals::BOOTSEL;
 #[allow(unused_imports)]
 use embassy_rp::gpio::Input;
+use embassy_rp::peripherals::BOOTSEL;
 
 #[cfg(not(feature = "no-touch"))]
 use embassy_rp::bootsel::is_bootsel_pressed;

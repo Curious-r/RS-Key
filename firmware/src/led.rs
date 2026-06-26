@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(not(led_kind = "none"))]
 use embassy_time::{Duration, Instant, Timer};
 #[cfg(not(led_kind = "none"))]
-use smart_leds::RGB8;
+use smart_leds::{RGB8, SmartLedsWriteAsync};
 
 // Every non-`none` build compiles all three hardware backends — the driver and
 // pin are chosen at runtime from the phy record (see `main`). The embassy color
@@ -548,7 +548,7 @@ fn splitmix32(mut x: u32) -> u32 {
 /// positions stay dark.
 #[cfg(not(led_kind = "none"))]
 #[embassy_executor::task]
-pub async fn ws2812_task(mut ws2812: PioWs2812<'static, PIO0, 0, MAX_LEDS, Ws2812Order>) {
+pub async fn ws2812_task(mut ws2812: PioWs2812<'static, PIO0, 0, Ws2812Order>) {
     let mut tick: u32 = 0;
     // LEGACY blink state (tracked here because it is the only effect that
     // needs mutable state across ticks).
@@ -568,7 +568,7 @@ pub async fn ws2812_task(mut ws2812: PioWs2812<'static, PIO0, 0, MAX_LEDS, Ws281
                 core::mem::swap(&mut c.r, &mut c.g);
             }
         }
-        ws2812.write(&buf).await;
+        let _ = ws2812.write(buf).await;
         Timer::after_millis(5).await;
     }
 }
